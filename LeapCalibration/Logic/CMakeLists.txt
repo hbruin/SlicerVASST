@@ -20,6 +20,7 @@ set(${KIT}_SRCS
 set(${KIT}_TARGET_LIBRARIES
   opencv_imgproc
   opencv_videoio
+  opencv_highgui
   vtkSlicerPointToLineRegistrationModuleLogic
   vtkSlicerVideoCamerasModuleMRML
   )

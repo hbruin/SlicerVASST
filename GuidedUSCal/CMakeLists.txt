@@ -1,11 +1,6 @@
 #-----------------------------------------------------------------------------
 set(MODULE_NAME GuidedUSCal)
 
-if(NOT SlicerIGT_FOUND OR NOT VASSTAlgorithms_FOUND)
-  message(FATAL_ERROR "Unable to find dependent modules. Please ensure SlicerIGT and VASSTAlgorithms have been built properly.")
-  return()
-endif()
-
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
@@ -13,6 +8,9 @@ set(MODULE_PYTHON_SCRIPTS
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
+  Resources/Models/cnn_model_best.keras.h5
+  Resources/Models/cnn_model_best_big.keras.h5
+  Resources/Models/CrossHair.vtk
   )
 
 #-----------------------------------------------------------------------------

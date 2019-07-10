@@ -40,6 +40,7 @@
 #include <vtkPointToLineRegistration.h>
 
 // OpenCV includes
+#include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 
 //----------------------------------------------------------------------------
@@ -62,11 +63,12 @@ public:
     , LeftCameraNode(nullptr)
     , RightCameraNode(nullptr)
     , TipToHMDTransformNode(nullptr)
-    , SegmentImageThread(std::thread(&vtkSlicerLeapCalibrationLogicInternal::ThreadedSegmentationFunction, this))
+    , SegmentImageThread(std::thread())
     , Calibration(vtkMatrix4x4::New())
     , Run(false)
     , SegmentedImageCount(0)
     , Registration(vtkPointToLineRegistration::New())
+    , LeapBaselineMm(40)
   {}
 
   ~vtkSlicerLeapCalibrationLogicInternal()
@@ -130,7 +132,7 @@ void vtkSlicerLeapCalibrationLogicInternal::ThreadedSegmentationFunction()
     this->AccessMutex.lock();
     if (this->RightImageNode != nullptr && this->RightCameraNode != nullptr && this->TipToHMDTransformNode != nullptr)
     {
-      if (SegmentImage(this->RightImageNode->GetImageData(), this->RightCameraNode, -this->LeapBaselineMm / 2))
+      if (SegmentImage(this->RightImageNode->GetImageData(), this->RightCameraNode, this->LeapBaselineMm / 2))
       {
         this->InvokeEvent(vtkSlicerLeapCalibrationLogic::RightImageSegmentedEvent);
       }
@@ -166,38 +168,37 @@ bool vtkSlicerLeapCalibrationLogicInternal::SegmentImage(vtkImageData* image, vt
       cvType = CV_8UC4;
       break;
   }
-  cv::Mat leftImage(image->GetDimensions()[0], image->GetDimensions()[1], cvType, image->GetScalarPointer());
+  cv::Mat cvImage(image->GetDimensions()[1], image->GetDimensions()[0], cvType, image->GetScalarPointer());
   if (image->GetNumberOfScalarComponents() > 1)
   {
-    cv::cvtColor(leftImage, leftImage, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(cvImage, cvImage, cv::COLOR_BGR2GRAY);
   }
 
   // undistort image
   cv::Mat intrin(3, 3, CV_64F, camNode->GetIntrinsicMatrix()->GetData());
   cv::Mat dist(1, 5, CV_64F, camNode->GetDistortionCoefficients()->GetVoidPointer(0));
   cv::Mat undistImage;
-  cv::undistort(leftImage, undistImage, intrin, dist, intrin);
+  cv::undistort(cvImage, undistImage, intrin, dist, intrin);
 
-  std::vector<cv::Vec3d> circles;
+  std::vector<cv::Vec3f> circles;
   cv::HoughCircles(undistImage, circles, cv::HOUGH_GRADIENT, 0.125, 1, 100.0, 6.0); // values empirically determined from experimentation
   if (circles.size() > 0)
   {
     // Calculate ray from position
-    cv::Vec3d circle = circles[0];
-    std::cerr << "circle: " << circle[0] << ", " << circle[1] << std::endl;
+    cv::Mat circle(3, 1, CV_64F);
+    circle.at<double>(0, 0) = circles[0][0];
+    circle.at<double>(1, 0) = circles[0][1];
+    circle.at<double>(2, 0) = 1.0;
 
     // Origin - always +-baseline, 0, 0
     cv::Vec3d origin_sen(originOffsetMm, 0.0, 0.0);
 
-    std::cerr << origin_sen << std::endl;
-    std::cerr << intrin << std::endl;
-    std::cerr << dist << std::endl;
-
     // Calculate the direction vector for the given pixel
     // Find the inverse of the videoCamera intrinsic param matrix
-    cv::Mat intrinInv = intrin.inv(cv::DECOMP_NORMAL);
+    cv::Mat intrinInv = intrin.inv(cv::DECOMP_LU);
+
     // Calculate direction vector by multiplying the inverse of the intrinsic param matrix by the pixel
-    cv::Mat directionVec_sen = intrinInv * circle / cv::norm((intrinInv * circle), cv::NORM_L2);
+    cv::Mat directionVec_sen = (intrinInv * circle) / cv::norm((intrinInv * circle));
 
     // And add it to the list!
     this->Registration->AddLine(origin_sen[0], origin_sen[1], origin_sen[2], directionVec_sen.at<double>(0, 0), directionVec_sen.at<double>(0, 1), directionVec_sen.at<double>(0, 2));
@@ -206,8 +207,6 @@ bool vtkSlicerLeapCalibrationLogicInternal::SegmentImage(vtkImageData* image, vt
     vtkNew<vtkMatrix4x4> tipToHMD;
     this->TipToHMDTransformNode->GetMatrixTransformToParent(tipToHMD);
     this->Registration->AddPoint(tipToHMD->GetElement(0, 3), tipToHMD->GetElement(1, 3), tipToHMD->GetElement(2, 3));
-
-    return true;
   }
 
   return false;
@@ -289,7 +288,7 @@ void vtkSlicerLeapCalibrationLogic::Start()
   if (!this->Internal->Run)
   {
     this->Internal->Run = true;
-    this->Internal->SegmentImageThread.join();
+    this->Internal->SegmentImageThread = std::thread(&vtkSlicerLeapCalibrationLogicInternal::ThreadedSegmentationFunction, this->Internal);
   }
   this->Internal->AccessMutex.unlock();
 }
