@@ -9,7 +9,6 @@ set(MODULE_PYTHON_SCRIPTS
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
   Resources/Models/cnn_model_best.keras.h5
-  Resources/Models/cnn_model_best_big.keras.h5
   Resources/Models/CrossHair.vtk
   )
 
