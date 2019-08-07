@@ -180,6 +180,8 @@ bool vtkSlicerLeapCalibrationLogicInternal::SegmentImage(vtkImageData* image, vt
   cv::Mat undistImage;
   cv::undistort(cvImage, undistImage, intrin, dist, intrin);
 
+  cv::threshold(undistImage, undistImage, 120.0, 255.0, cv::THRESH_BINARY);
+
   std::vector<cv::Vec3f> circles;
   cv::HoughCircles(undistImage, circles, cv::HOUGH_GRADIENT, 0.125, 1, 100.0, 6.0); // values empirically determined from experimentation
   if (circles.size() > 0)
