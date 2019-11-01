@@ -7,9 +7,23 @@ import re
 import SimpleITK as sitk
 import numpy as np 
 import sitkUtils 
-from tensorflow.keras.models import load_model
-import cv2
-import shutil 
+
+if '4.11' in slicer.__path__[0]: 
+  try: 
+    import cv2
+    OPENCV2_AVAIL = True
+  except ImportError:
+    print("Please ensure that SlicerOpenCV extension is installed.")
+
+  try: 
+    from tensorflow.keras.models import load_model
+  except ImportError: 
+    print("Please run: slicer.util.pip_install('tensorflow') in the python terminal and restart slicer")
+    
+  try: 
+    import clipboard
+  except ImportError: 
+    print("Please run: slicer.util.pip_install('clipboard') in the python terminal and restart slicer")
 
 # This is the basis of your module and will load the basic module GUI 
 class GuidedUSCal(ScriptedLoadableModule):
@@ -38,7 +52,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     self.tempNode = None 
     self.connectorNode = None
     self.sceneObserverTag = None
-    self.numFid = None
     self.logic = GuidedUSCalLogic()
     self.resliceLogic = slicer.modules.volumereslicedriver.logic()
     self.imageNode = None
@@ -47,58 +60,47 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     self.sequenceNode2 = None 
     self.sequenceBrowserNode = None
     self.transformNode = None 
+    self.dataStack = None 
     self.numFid = 0
     self.sequenceLogic = slicer.modules.sequencebrowser.logic()
-    self.tol = 0.000000001 
     self.counter = 0 
     self.centroid = [0,0,0]
     self.isVisualizing = False
-    self.manualOutputRegistrationTransformNode = None
-    self.inputRegistrationTransformNode = None
-    self.NeedleTipToReferenceTransformNode = None
-    self.otsu_filter = sitk.OtsuThresholdImageFilter()
-    inside_value = 0
-    outside_value = 1
-    self.ImageToProbeMan = vtk.vtkMatrix4x4()
-    self.ImageToProbeAuto= vtk.vtkMatrix4x4()
-    self.otsu_filter.SetOutsideValue(outside_value)
-    self.otsu_filter.SetInsideValue(inside_value)
-    self.binary_filt = sitk.BinaryThresholdImageFilter()
-    self.binary_filt.SetInsideValue(inside_value)
-    self.binary_filt.SetOutsideValue(outside_value)
-    self.binary_filt.SetUpperThreshold(255)
-    self.dilate_filt = sitk.BinaryDilateImageFilter()
-    self.conncomp_filt = sitk.BinaryImageToLabelMapFilter()
-    self.conncomp_filt.FullyConnectedOn()
-    self.conncomp_filt.SetInputForegroundValue(0)
-    self.conncomp_filt.SetOutputBackgroundValue(0)
-    self.labelFilt = sitk.LabelShapeStatisticsImageFilter()
     self.currentMatrix = np.matrix('1,0,0,0;0,1,0,0;0,0,1,0;0,0,0,1', dtype = np.float64)
-    self.RInit = vtk.vtkMatrix4x4()
     slicer.mymod = self
     self.connectCheck = 0 
-    self.ijkMat = vtk.vtkMatrix4x4()
-    self.imTrans = vtk.vtkTransform()
     self.node = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
     self.path = os.path.dirname(os.path.abspath(__file__))
     self.model = load_model(os.path.join(self.path,'Resources\Models\cnn_model_best.keras.h5'))
-    self.fiducialNodeAuto = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode')
     self.fiducialNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode')
-    self.w_resized = self.model.layers[0].output_shape[1]
-    self.h_resized = self.model.layers[0].output_shape[2]
+    self.fiducialNode.CreateDefaultDisplayNodes()
+    self.displayNode = self.fiducialNode.GetDisplayNode()
+    self.displayNode.SetGlyphType(7)
+    self.displayNode.SetGlyphScale(2)
+    self.displayNode.SetTextScale(0)
+    self.displayNode.PointLabelsVisibilityOff()
+    self.displayNode.SetSelectedColor(0, 0, 1)
+    self.defaultDisplayNode = slicer.modules.markups.logic().GetDefaultMarkupsDisplayNode()
+    self.defaultDisplayNode.SetGlyphType(7)
+    self.defaultDisplayNode.SetGlyphScale(2)
+    self.defaultDisplayNode.SetTextScale(0)
+    self.defaultDisplayNode.SetSelectedColor(0, 0, 1)
+    self.defaultDisplayNode.PointLabelsVisibilityOff()
+    self.wResized = self.model.layers[0].output_shape[0][1]
+    self.hResized = self.model.layers[0].output_shape[0][2]
     self.tipToProbeTransform = vtk.vtkMatrix4x4()
-    self.manualOutputRegistrationTransformNode = slicer.vtkMRMLLinearTransformNode()
-    slicer.mrmlScene.AddNode(self.manualOutputRegistrationTransformNode)
-    self.manualOutputRegistrationTransformNode.SetName('ImageToProbe')
+    self.outputRegistrationTransformNode = slicer.vtkMRMLLinearTransformNode()
+    slicer.mrmlScene.AddNode(self.outputRegistrationTransformNode)
+    self.outputRegistrationTransformNode.SetName('ImageToProbe')
+    self.needleModel = slicer.modules.createmodels.logic().CreateNeedle(150, 0.4, 0, False)
+    self.imageToProbe = vtk.vtkMatrix4x4()
+    self.redoStack = None 
+    # This sets the color
   def setup(self):
     # this is the function that implements all GUI 
     ScriptedLoadableModuleWidget.setup(self)
-
     # This sets the view being used to the red view only 
     slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
-
-    l = slicer.modules.createmodels.logic()
-    self.needleModel = l.CreateNeedle(150, 0.4, 0, False)
     #This code block creates a collapsible button 
     #This defines which type of button you are using 
     self.usContainer = ctk.ctkCollapsibleButton()
@@ -119,7 +121,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     self.IPLabel = qt.QLabel("Server IP:")
     if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:
       self.usLayout.addRow(self.IPLabel, self.inputIPLineEdit)
-
     #This code block is the exact same as the one above only it asks for the server port 
     self.layout.addWidget(self.usContainer)
     self.inputPortLineEdit = qt.QLineEdit()
@@ -129,7 +130,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     self.portLabel = qt.QLabel("Sever Port:")
     if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:
       self.usLayout.addRow(self.portLabel, self.inputPortLineEdit)
-
     #This is a push button 
     self.connectButton = qt.QPushButton()
     self.connectButton.setDefault(False)
@@ -140,7 +140,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     #adds the widget to the layout 
     if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:
       self.usLayout.addWidget(self.connectButton)
-
     # Combobox for image selection
     self.imageSelector = slicer.qMRMLNodeComboBox()
     self.imageSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
@@ -219,63 +218,41 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     #This is the exact same as the code block below but it freezes the US to capture a screenshot 
     self.freezeButton = qt.QPushButton()
     if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:
-      self.freezeButton.text = "Freeze"
+      self.freezeButton.text = "Place Fiducial ('f')"
     else:
       self.freezeButton.text = "Place Fiducial"
     self.freezeButton.toolTip = "Freeze the ultrasound image for fiducial placement"
     self.fiducialLayout.addRow(self.freezeButton)
     self.shortcut = qt.QShortcut(qt.QKeySequence('f'), slicer.util.mainWindow())
+    self.undoButton = qt.QPushButton()
+    self.undoButton.setText("Undo ('u')")
+    self.fiducialLayout.addRow(self.undoButton)
+    self.uShortcut = qt.QShortcut(qt.QKeySequence('ctrl+u'), slicer.util.mainWindow())
+    self.redoButton = qt.QPushButton()
+    self.rShortcut = qt.QShortcut(qt.QKeySequence('r'), slicer.util.mainWindow())
+    self.redoButton.setText("Redo ('r')")
+    self.fiducialLayout.addRow(self.redoButton)
     
     self.numFidLabel = qt.QLabel()
     self.fiducialLayout.addRow(qt.QLabel("Fiducials collected:"), self.numFidLabel)
-
-    self.transformTable = qt.QTableWidget() 
-    self.transTableItem = qt.QTableWidgetItem()
-    self.fidError = qt.QLabel()
-    self.transformTable.setRowCount(4)
-    self.transformTable.setColumnCount(4)
-    self.transformTable.horizontalHeader().hide()
-    self.transformTable.verticalHeader().hide()
-    self.transformTable.setItem(0,0, qt.QTableWidgetItem("1"))
-    self.transformTable.setItem(0,1, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(0,2, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(0,3, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(1,0, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(1,1, qt.QTableWidgetItem("1"))
-    self.transformTable.setItem(1,2, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(1,3, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(2,0, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(2,1, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(2,2, qt.QTableWidgetItem("1"))
-    self.transformTable.setItem(2,3, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(3,0, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(3,1, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(3,2, qt.QTableWidgetItem("0"))
-    self.transformTable.setItem(3,3, qt.QTableWidgetItem("1"))
-    self.transformTable.setSizePolicy(qt.QSizePolicy.Minimum, qt.QSizePolicy.MinimumExpanding)
-    self.copyIcon =qt.QIcon(":Icons/Medium/SlicerEditCopy.png")
-    self.copyButton = qt.QPushButton()
-    self.copyButton.setIcon(self.copyIcon)
-    self.copyButton.toolTip = "Copy" 
-    self.copyButton.setMaximumWidth(64)
-    self.copyHbox = qt.QHBoxLayout()
-    self.copyHbox.addWidget(self.copyButton)
     
-    self.copyButton.enabled = False 
-    if self.numFid >= 2: 
-      self.copyButton.enabled = True 
-      
+    self.transformTable = ctk.ctkMatrixWidget() 
+    self.transformTable.columnCount = 4
+    self.transformTable.rowCount = 4 
+    self.transformTable.setDecimals(3)
+    for i in range (0,4): 
+      for j in range(0,4): 
+        self.transformTable.setValue(i,j, (self.imageToProbe.GetElement(i,j)))
+    
     self.fiducialLayout.addRow(qt.QLabel("Image to probe transform:"))
     self.fiducialLayout.addRow(self.transformTable)
          # Add vertical spacer
-    self.layout.addStretch(1)
     
-         # Add vertical spacer
-    self.layout.addStretch(1)
+    self.copyButton = qt.QPushButton()
+    self.copyButton.setText('Copy Transform')
+    self.copyButton.toolTip = "Copy" 
+    self.fiducialLayout.addRow(self.copyButton) 
     
-    self.fiducialLayout.addRow("Copy:", self.copyHbox)
- 
-
     self.validationContainer = ctk.ctkCollapsibleButton()
     self.validationContainer.text = "Validation"
     self.validationLayout = qt.QFormLayout(self.validationContainer)
@@ -284,8 +261,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     self.visualizeButton.toolTip = "This button enables the 3D view for visual validation"
     self.validationLayout.addRow(self.visualizeButton)
     self.visualizeButton.connect('clicked(bool)', self.onVisualizeButtonClicked)
-
-
     self.resetButton = qt.QPushButton('Reset')
     self.resetButton.setDefault(False)
     self.resetButton.toolTip = "This Button Resets the Module"
@@ -321,6 +296,10 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     self.imageSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.onImageChanged)
     self.TransformSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.onTransformChanged)
     self.resetButton.connect('clicked(bool)', self.onResetButtonClicked)
+    self.undoButton.connect('clicked(bool)', self.onUndoButtonClicked)
+    self.uShortcut.connect('activated()', self.onUndoButtonClicked)
+    self.redoButton.connect('clicked(bool)', self.onRedoButtonClicked)
+    self.rShortcut.connect('activated()', self.onRedoButtonClicked)
     # Disable buttons until conditions are met
     self.connectButton.setEnabled(True) 
     # if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:
@@ -331,6 +310,15 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
   
   @vtk.calldata_type(vtk.VTK_OBJECT)
   def onNodeAdded(self, caller, event, callData):
+    if type(callData) is slicer.vtkMRMLSequenceBrowserNode:
+      if self.connectorNode is None:
+        self.inputIPLineEdit.hide() 
+        self.inputPortLineEdit.hide() 
+        self.IPLabel.hide()
+        self.portLabel.hide()
+        self.recordContainer.hide() 
+        self.connectButton.hide() 
+        self.connectCheck = 1 
     # if the node that is created is of type vtkMRMLMarkupsFiducialNODE 
     if type(callData) is slicer.vtkMRMLMarkupsFiducialNode:
       # if there is something in this node 
@@ -344,11 +332,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
         self.markupAddedObserverTag = self.fiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.onMarkupAdded)
         #this runs the function onMarkupAdded
         self.onMarkupAdded(self.fiducialNode, slicer.vtkMRMLMarkupsNode.PointModifiedEvent)
-      if type(callData) is slicer.vtkMRMLSequenceBrowserNode:
-        if self.connectorNode is None: 
-          self.onSequenceAdded()
-          self.connectCheck = 1
-    
   def onConnectButtonClicked(self):
     # Creates a connector Node
     if self.connectorNode is None:
@@ -370,7 +353,7 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
         # Connected
         self.connectorNode.Stop()
         self.connectButton.text = "Connect"
-        self.freezeButton.text = "Unfreeze" 
+        self.freezeButton.text = "Unfreeze ('f')" 
         if self.imageSelector.currentNode() or self.TransformSelector.currentNode() is None: 
           if self.imageNode is None: 
             print('Please select an US volume')
@@ -385,7 +368,7 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
         # This starts the connection
         self.connectorNode.Start()
         self.connectButton.text = "Disconnect"
-        self.freezeButton.text = "Freeze"
+        self.freezeButton.text = "Place fiducial ('f')"
       if self.fiducialNode is not None:
         self.fiducialNode.RemoveAllMarkups()
   
@@ -400,15 +383,12 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     if self.imageNode is not None and self.transformNode is not None:
       self.numFid = self.numFid+1 
       self.numFidLabel.setText(str(self.numFid))
-      #self.manualOutputRegistrationTransformNode = slicer.vtkMRMLLinearTransformNode()
-      #slicer.mrmlScene.AddNode(self.manualOutputRegistrationTransformNode)
-      #self.manualOutputRegistrationTransformNode.SetName('ImageToProbe')
       if self.manual.isChecked() == True:
         slicer.modules.markups.logic().StartPlaceMode(0)
-        slicer.app.layoutManager().sliceWidget('Red').setCursor(qt.QCursor(2))
-        self.tempNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode')
+        self.markupAddedObserverTag = self.fiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.onMarkupAdded)
+        self.onMarkupAdded(self.fiducialNode, slicer.vtkMRMLMarkupsNode.PointModifiedEvent);
       if self.auto.isChecked() == True: 
-        self.fiducialNodeAuto.RemoveAllMarkups()
+        self.fiducialNode.RemoveAllMarkups()
         self.I = slicer.util.arrayFromVolume(slicer.util.getNode('Image_Probe'))
         self.shape = self.I.shape
         self.Im = np.resize(self.I, [self.shape[1],self.shape[2]])
@@ -417,63 +397,37 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
         self.x = self.Im[:,0:self.shape[1]-5]/255
         self.w = self.x.shape[0]
         self.h = self.x.shape[1]
-        if self.w_resized != 128: 
-          self.x = np.resize(self.x, [self.w_resized,self.h_resized,1])
+        if self.wResized != 128: 
+          self.x = np.resize(self.x, [self.wResized,self.hResized,1])
         else:
-          self.x = np.expand_dims(cv2.resize(self.x, (self.w_resized, self.h_resized)), axis=3)
+          self.x = np.expand_dims(cv2.resize(self.x, (self.wResized, self.hResized)), axis=3)
         slicer.util.updateVolumeFromArray(self.node, self.x)
-        self.centroidAuto = self.segment_image(self.Im)
-        self.fiducialNodeAuto.AddFiducialFromArray([self.centroidAuto[0], self.centroidAuto[1],0])
+        self.centroid = self.segment_image(self.Im)
+        self.fiducialNode.AddFiducialFromArray([self.centroid[0], self.centroid[1],0])
         self.transformNode.GetMatrixTransformToWorld(self.tipToProbeTransform)
-        self.originAuto = [self.tipToProbeTransform.GetElement(0, 3), self.tipToProbeTransform.GetElement(1,3), self.tipToProbeTransform.GetElement(2,3)]
-        self.dirAuto = [self.tipToProbeTransform.GetElement(0, 2), self.tipToProbeTransform.GetElement(1,2), self.tipToProbeTransform.GetElement(2,2)]
-        self.logic.AddPointAndLineAuto([self.centroidAuto[0],self.centroidAuto[1],0], self.originAuto, self.dirAuto)
-        self.ImageToProbeAuto = self.logic.registrationLogicAuto.CalculateRegistration()
-        self.transformTable.setItem(0,0, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(0,0))))
-        self.transformTable.setItem(0,1, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(0,1))))
-        self.transformTable.setItem(0,2, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(0,2))))
-        self.transformTable.setItem(0,3, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(0,3))))
-        self.transformTable.setItem(1,0, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(1,0))))
-        self.transformTable.setItem(1,1, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(1,1))))
-        self.transformTable.setItem(1,2, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(1,2))))
-        self.transformTable.setItem(1,3, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(1,3))))
-        self.transformTable.setItem(2,0, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(2,0))))
-        self.transformTable.setItem(2,1, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(2,1))))
-        self.transformTable.setItem(2,2, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(2,2))))
-        self.transformTable.setItem(2,3, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(2,3))))
-        self.transformTable.setItem(3,0, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(3,0))))
-        self.transformTable.setItem(3,1, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(3,1))))
-        self.transformTable.setItem(3,2, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(3,2))))
-        self.transformTable.setItem(3,3, qt.QTableWidgetItem(str(self.ImageToProbeAuto.GetElement(3,3))))
-        self.transformTable.resizeColumnToContents(0)
-        self.transformTable.resizeColumnToContents(1)
-        self.transformTable.resizeColumnToContents(2)
-        self.transformTable.resizeColumnToContents(3)
+        self.origin = [self.tipToProbeTransform.GetElement(0, 3), self.tipToProbeTransform.GetElement(1,3), self.tipToProbeTransform.GetElement(2,3)]
+        self.dir = [self.tipToProbeTransform.GetElement(0, 2), self.tipToProbeTransform.GetElement(1,2), self.tipToProbeTransform.GetElement(2,2)]
+        self.logic.AddPointAndLine([self.centroid[0],self.centroid[1],0], self.origin, self.dir)
+        self.imageToProbe = self.logic.registrationLogic.CalculateRegistration()
+        if self.dataStack is None: 
+          self.dataStack = [[self.centroid[0],self.centroid[1], self.origin, self.dir]]
+        else: 
+          self.dataStack.append([self.centroid[0],self.centroid[1], self.origin, self.dir])
+        for i in range (0,4): 
+          for j in range(0,4): 
+            self.transformTable.setValue(i,j,(self.imageToProbe.GetElement(i,j)))
         slicer.app.layoutManager().sliceWidget("Red").sliceController().fitSliceToBackground()
         if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:  
           self.connectorNode.Start()
           self.connectButton.text = "Disconnect"
-          self.freezeButton.text = "Freeze"
+          self.freezeButton.text = "(Place Fiducial ('f'))"
   
   # This gets called when the markup is added
   def onMarkupAdded(self, fiducialNodeCaller, event):
     # Set the location and index to zero because its needs to be initialized
+    self.centroid = [0,0,0]
     if self.manual.isChecked() == True:
-      self.centroid=[0,0,0]
       # This checks if there is not a display node 
-      if self.fiducialNode.GetDisplayNode() is None:
-        # then creates one if that is the case 
-        self.fiducialNode.CreateDefaultDisplayNodes()
-      # This sets a variable as the display node
-      displayNode = self.fiducialNode.GetDisplayNode()
-      # This sets the type to be a cross hair
-      displayNode.SetGlyphType(3)
-      # This sets the size
-      displayNode.SetGlyphScale(2.5)
-      # This says that you dont want text
-      displayNode.SetTextScale(0)
-      # This sets the color
-      displayNode.SetSelectedColor(0, 0, 1)
       # Do nothing if markup has not been placed
       if self.fiducialNode.GetNthControlPointPositionStatus(self.fiducialNode.GetNumberOfMarkups()-1) != slicer.vtkMRMLMarkupsNode.PositionDefined:
           return
@@ -483,34 +437,16 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
       self.transformNode.GetMatrixTransformToWorld(self.tipToProbeTransform)
       self.origin = [self.tipToProbeTransform.GetElement(0, 3), self.tipToProbeTransform.GetElement(1,3), self.tipToProbeTransform.GetElement(2,3)]
       self.dir = [self.tipToProbeTransform.GetElement(0, 2), self.tipToProbeTransform.GetElement(1,2), self.tipToProbeTransform.GetElement(2,2)]
-      self.logic.AddPointAndLineMan([self.centroid[0],self.centroid[1],0], self.origin, self.dir)
-      self.ImageToProbeMan = self.logic.registrationLogicMan.CalculateRegistration()
-      if self.manual.isChecked() == True:
-        self.transformTable.setItem(0,0, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(0,0))))
-        self.transformTable.setItem(0,1, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(0,1))))
-        self.transformTable.setItem(0,2, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(0,2))))
-        self.transformTable.setItem(0,3, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(0,3))))
-        self.transformTable.setItem(1,0, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(1,0))))
-        self.transformTable.setItem(1,1, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(1,1))))
-        self.transformTable.setItem(1,2, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(1,2))))
-        self.transformTable.setItem(1,3, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(1,3))))
-        self.transformTable.setItem(2,0, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(2,0))))
-        self.transformTable.setItem(2,1, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(2,1))))
-        self.transformTable.setItem(2,2, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(2,2))))
-        self.transformTable.setItem(2,3, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(2,3))))
-        self.transformTable.setItem(3,0, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(3,0))))
-        self.transformTable.setItem(3,1, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(3,1))))
-        self.transformTable.setItem(3,2, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(3,2))))
-        self.transformTable.setItem(3,3, qt.QTableWidgetItem(str(self.ImageToProbeMan.GetElement(3,3))))
-        self.transformTable.resizeColumnToContents(0)
-        self.transformTable.resizeColumnToContents(1)
-        self.transformTable.resizeColumnToContents(2)
-        self.transformTable.resizeColumnToContents(3)
+      self.logic.AddPointAndLine([self.centroid[0],self.centroid[1],0], self.origin, self.dir)
+      self.imageToProbe = self.logic.registrationLogic.CalculateRegistration()
+      if self.dataStack is None: 
+        self.dataStack = [[self.centroid[0],self.centroid[1], self.origin, self.dir]]
+      else: 
+        self.dataStack.append([self.centroid[0],self.centroid[1], self.origin, self.dir])
+      for i in range (0,4): 
+        for j in range(0,4): 
+          self.transformTable.setValue(i,j,(self.imageToProbe.GetElement(i,j)))
       slicer.app.layoutManager().sliceWidget("Red").sliceController().fitSliceToBackground()
-      if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:  
-        self.connectorNode.Start()
-        self.connectButton.text = "Disconnect"
-        self.freezeButton.text = "Freeze"
 
   def onImageChanged(self):
     if self.imageNode is not None:
@@ -523,6 +459,7 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     else: 
       self.imageNode.GetDisplayNode().SetAutoWindowLevel(0)
       self.imageNode.GetDisplayNode().SetWindowLevelMinMax(0,120)
+      self.imageNode.SetName('Image_Probe') 
       slicer.app.layoutManager().sliceWidget('Red').sliceLogic().GetSliceCompositeNode().SetBackgroundVolumeID(self.imageSelector.currentNode().GetID())
       # Configure volume reslice driver, transverse
       self.resliceLogic.SetDriverForSlice(self.imageNode.GetID(), slicer.mrmlScene.GetNodeByID('vtkMRMLSliceNodeRed'))
@@ -544,24 +481,15 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
     if slicer.mrmlScene.GetNodesByClass("vtkMRMLSequenceNode").GetNumberOfItems() == 0:
       if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}[^0-9]", self.inputIPLineEdit.text) and self.inputPortLineEdit.text != "" and int(self.inputPortLineEdit.text) > 0 and int(self.inputPortLineEdit.text) <= 65535:
         self.connectButton.enabled = True
-        # self.freezeButton.enabled = True
         if self.connectorNode is not None:
           self.connectorNode.SetTypeClient(self.inputIPLineEdit.text, int(self.inputPortLineEdit.text))
       else:
         self.connectButton.enabled = True
-      
-  def onCopyButtonClicked(self,numFidLabel):
-    if self.numFid >=1:
-      if self.auto.isChecked() == True: 
-        self.outputTransform = str(self.ImageToProbeAuto.GetElement(0,0))+" "+ str(self.ImageToProbeAuto.GetElement(0,1))+" "+str(self.ImageToProbeAuto.GetElement(0,2))+" "+str(self.ImageToProbeAuto.GetElement(0,3))+ "\r\n"+str(self.ImageToProbeAuto.GetElement(1,0))+" "+str(self.ImageToProbeAuto.GetElement(1,1))+" "+str(self.ImageToProbeAuto.GetElement(1,2))+" "+str(self.ImageToProbeAuto.GetElement(1,3)) + "\r\n"+str(self.ImageToProbeAuto.GetElement(2,0))+" "+str(self.ImageToProbeAuto.GetElement(2,1))+" "+str(self.ImageToProbeAuto.GetElement(2,2))+" "+str(self.ImageToProbeAuto.GetElement(2,3))
-      if self.manual.isChecked() == True:
-        self.outputTransform = '[' + str(self.ImageToProbeMan.GetElement(0,0))+','+ str(self.ImageToProbeMan.GetElement(0,1))+','+str(self.ImageToProbeMan.GetElement(0,2))+','+str(self.ImageToProbeMan.GetElement(0,3))+','+str(self.ImageToProbeMan.GetElement(1,3))+';'+str(self.ImageToProbeMan.GetElement(1,0))+','+str(self.ImageToProbeMan.GetElement(1,1))+','+str(self.ImageToProbeMan.GetElement(1,2))+','+str(self.ImageToProbeMan.GetElement(1,3))+';'+str(self.ImageToProbeMan.GetElement(2,0))+','+str(self.ImageToProbeMan.GetElement(2,1))+','+str(self.ImageToProbeMan.GetElement(2,2))+','+str(self.ImageToProbeMan.GetElement(2,3))+']'
-    else:
-      self.outputTransform = 'Calibration Required' 
-    self.copy = 'echo ' + self.outputTransform.strip() + '| clip'
-    os.system(self.copy) 
-    
-  # removes the observer
+        
+  def onCopyButtonClicked(self):
+    self.outputTransform = str(self.imageToProbe.GetElement(0,0))+" "+ str(self.imageToProbe.GetElement(0,1))+" "+str(self.imageToProbe.GetElement(0,2))+" "+str(self.imageToProbe.GetElement(0,3))+ "\r\n"+str(self.imageToProbe.GetElement(1,0))+" "+str(self.imageToProbe.GetElement(1,1))+" "+str(self.imageToProbe.GetElement(1,2))+" "+str(self.imageToProbe.GetElement(1,3)) + "\r\n"+str(self.imageToProbe.GetElement(2,0))+" "+str(self.imageToProbe.GetElement(2,1))+" "+str(self.imageToProbe.GetElement(2,2))+" "+str(self.imageToProbe.GetElement(2,3))
+    clipboard.copy(self.outputTransform)
+
   def onRecordButtonClicked(self):
     if self.connectCheck == 0:
       if self.sequenceBrowserNode is None:
@@ -585,8 +513,6 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
           self.sequenceBrowserNode.EndModify(self.modifyFlag)
           self.RecordButton.text = "Recording"
           self.StopRecordButton.setEnabled(True)
-          # self.sequenceBrowserNode.SetRecording(self.sequenceNode, self.sequenceNode2, True)
-          # TRYING THIS SEEING IF IT WORKS! 
           self.sequenceBrowserNode.SetRecording(self.sequenceNode, True)
           self.sequenceBrowserNode.SetRecording(self.sequenceNode2, True)
           self.sequenceBrowserNode.SetRecordingActive(True)
@@ -642,7 +568,7 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
       slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)    
       self.isVisualizing = False
       self.visualizeButton.text = 'Show 3D Scene'
-      self.manualOutputRegistrationTransformNode.SetMatrixTransformToParent(None)
+      self.outputRegistrationTransformNode.SetMatrixTransformToParent(None)
     else:
       self.isVisualizing = True
       slicer.app.layoutManager().sliceWidget('Red').sliceLogic().GetSliceNode().SetSliceVisible(True)
@@ -651,44 +577,10 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
       if self.transformNode is None: 
         print('Please select an US volume')
       else:
-        if self.manualOutputRegistrationTransformNode is None: 
-          self.manualOutputRegistrationTransformNode = slicer.vtkMRMLLinearTransformNode()
-        self.imageNode.SetAndObserveTransformNodeID(self.manualOutputRegistrationTransformNode.GetID())
-        if self.auto.isChecked() == True:
-          self.manualOutputRegistrationTransformNode.SetMatrixTransformToParent(self.ImageToProbeAuto)
-        if self.manual.isChecked() == True: 
-          self.manualOutputRegistrationTransformNode.SetMatrixTransformToParent(self.ImageToProbeMan)
+        self.imageNode.SetAndObserveTransformNodeID(self.outputRegistrationTransformNode.GetID())
+        self.outputRegistrationTransformNode.SetMatrixTransformToParent(self.imageToProbe)
   def onResetButtonClicked(self):
     slicer.mrmlScene.Clear(0)
-
-  def onSequenceAdded(self):
-    self.inputIPLineEdit.placeholderText = ""
-    self.IPLabel.setText("")
-    self.usLayout.removeWidget(self.IPLabel)
-    self.usLayout.removeWidget(self.inputIPLineEdit)
-    
-    self.inputPortLineEdit.placeholderText = ""
-    self.portLabel.setText("")
-    self.usLayout.removeWidget(self.portLabel)
-    self.usLayout.removeWidget(self.inputPortLineEdit)
-    
-    self.usLayout.removeWidget(self.connectButton)
-    
-    self.RecordButton.setText("")
-    self.recordLayout.removeWidget(self.RecordButton) 
-    self.StopRecordButton.setText("")
-    self.recordLayout.removeWidget(self.StopRecordButton)
-    self.pathText.setText("")
-    self.recordLayout.removeWidget(self.pathText)
-    self.pathInput.placeholderText = ""
-    self.recordLayout.removeWidget(self.pathInput)
-    self.SaveRecordButton.setText("")
-    self.recordLayout.removeWidget(self.SaveRecordButton)
-    self.recordContainer.collapsed = True 
-    
-    self.freezeButton.enabled = True 
-    self.freezeButton.text = "Place fiducial"
-    self.connectButton.enabled = True 
   
   def segment_image(self,x):
       y = self.model.predict(np.expand_dims(self.x, axis=0)).T
@@ -698,20 +590,45 @@ class GuidedUSCalWidget(ScriptedLoadableModuleWidget):
       # Reshape y to a row vector
       y = np.squeeze(y.T, axis=0)
       
-      return y
+      return [y[0],y[1],0]
   
-
+  def onUndoButtonClicked(self):
+    self.logic.registrationLogic.Reset() 
+    if self.redoStack is None: 
+      self.redoStack = [self.dataStack[-1]] 
+    else: 
+      self.redoStack.append(self.dataStack[-1])
+    self.dataStack.pop(-1)
+    for i in range(0,len(self.dataStack)):
+      self.logic.AddPointAndLine([self.dataStack[i][0],self.dataStack[i][1],0], self.dataStack[i][2], self.dataStack[i][3])
+      self.imageToProbe = self.logic.registrationLogic.CalculateRegistration()
+    self.numFid = self.numFid -1 
+    self.numFidLabel.setText(self.numFid)
+    self.fiducialNode.RemoveAllMarkups()
+    for i in range (0,4): 
+      for j in range(0,4): 
+        self.transformTable.setValue(i,j,(self.imageToProbe.GetElement(i,j)))
+  def onRedoButtonClicked(self):
+    self.logic.registrationLogic.Reset() 
+    if self.redoStack is not None:
+      self.dataStack.append(self.redoStack[-1])
+    else: 
+      print('There is nothing to redo')
+    self.redoStack.pop(-1)
+    for i in range(0,len(self.dataStack)):
+      self.logic.AddPointAndLine([self.dataStack[i][0],self.dataStack[i][1],0], self.dataStack[i][2], self.dataStack[i][3])
+      self.imageToProbe = self.logic.registrationLogic.CalculateRegistration()
+    self.numFid = self.numFid +1 
+    self.numFidLabel.setText(self.numFid)
+    self.fiducialNode.AddFiducialFromArray([self.dataStack[i][0],self.dataStack[i][1],0]) 
+    for i in range (0,4): 
+      for j in range(0,4): 
+        self.transformTable.setValue(i,j,(self.imageToProbe.GetElement(i,j)))
 class GuidedUSCalLogic(ScriptedLoadableModuleLogic):
   def __init__(self):
-    self.registrationLogicMan = slicer.vtkSlicerPointToLineRegistrationLogic()
-    self.registrationLogicMan.SetLandmarkRegistrationModeToAnisotropic()
-    
-    self.registrationLogicAuto = slicer.vtkSlicerPointToLineRegistrationLogic()
-    self.registrationLogicAuto.SetLandmarkRegistrationModeToAnisotropic()
-
-  def AddPointAndLineAuto(self, point, lineOrigin, lineDirection):
-    self.registrationLogicAuto.AddPointAndLine(point, lineOrigin, lineDirection)
-  def AddPointAndLineMan(self, point, lineOrigin, lineDirection):   
-    self.registrationLogicMan.AddPointAndLine(point, lineOrigin, lineDirection)
+    self.registrationLogic = slicer.vtkSlicerPointToLineRegistrationLogic()
+    self.registrationLogic.SetLandmarkRegistrationModeToAnisotropic()
+  def AddPointAndLine(self, point, lineOrigin, lineDirection):
+    self.registrationLogic.AddPointAndLine(point, lineOrigin, lineDirection)
     
   
